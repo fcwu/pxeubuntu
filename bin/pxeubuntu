@@ -5,14 +5,13 @@
 """
 
 
-__version__ = '0.2'
+__version__ = '0.3'
 __all__ = ['PxeUbuntu']
 __author__ = 'DoroWu'
 __home_page__ = ''
 
 import sys
 import time
-import datetime
 import signal
 import os
 import logging
@@ -21,10 +20,14 @@ import commands
 import subprocess
 import atexit
 import shutil
+import glob
 from datetime import datetime, timedelta
 import gobject
 from pyinotify import WatchManager, ThreadedNotifier, EventsCodes, ProcessEvent
 from argparse import ArgumentParser, SUPPRESS
+
+
+SHARE_FOLDER = '/usr/share/pxeubuntu'
 
 
 def main():
@@ -216,11 +219,11 @@ class GeneralError(Exception):
 
 class PxeUbuntu(Daemon):
     PXELINUX_DEFAULT_ITEM = \
-'''### {label} - start
-LABEL {label}
-    MENU LABEL {label}
-    KERNEL {label}/vmlinuz
-    APPEND initrd={label}/initrd.lz  root=/dev/nfs nfsroot=172.16.0.1:{nfs_base}/{label} netboot=nfs boot=casper automatic-ubiquity noprompt quiet splash --
+'''### {label} - start\\
+LABEL {label}\\
+    MENU LABEL {label}\\
+    KERNEL {label}/vmlinuz\\
+    APPEND initrd={label}/initrd.lz  root=/dev/nfs nfsroot=172.16.0.1:{nfs_base}/{label} netboot=nfs boot=casper automatic-ubiquity noprompt quiet splash --\\
 ### {label} - end
 '''
 
@@ -231,9 +234,6 @@ LABEL {label}
 
     def start(self):
         def _start():
-            # XXX check tftp start XXX
-            #     check tftp dir tree
-            #     check nfs start XXX
             if self._args.daemon:
                 super(self.__class__, self).start()
             else:
@@ -244,7 +244,6 @@ LABEL {label}
             path = getattr(self._args, path_attr)
             logging.info('args: {0}: {1}'.format(path_attr, path))
             if not os.path.isdir(path):
-                # XXX copy default tftp data
                 os.makedirs(path)
         action_fns = {'start': _start, 
                       'stop': self.stop,
@@ -263,6 +262,32 @@ LABEL {label}
         self.loop = gobject.MainLoop()
         gobject.threads_init()
 
+        # make sure loop dev is enough
+        Command('bash -c \'for ((i={0};i<{1};i++)); do [ -e /dev/loop$i ] '
+                '|| mknod -m 0600 /dev/loop$i b 7 $i; done\''.
+                format(0, 64)).run()
+
+        # reset tftpboot folder
+        Command('cp -r {0} {1}'.
+                format(os.path.join(SHARE_FOLDER, 'tftpboot/*'),
+                       self._args.tftp_dir + os.sep)).run()
+
+        #remove all in iso, then insert
+        files = []
+        for filename in os.listdir(self._args.iso_dir):
+            filepath = os.path.join(self._args.iso_dir, filename)
+            if not os.path.isfile(filepath) or not filepath.endswith('.iso'):
+                continue
+            files.append(filepath)
+        for f in files:
+            try:
+                self.remove(f)
+                self.insert(f)
+            except GeneralError as e:
+                logging.warning(str(e))
+
+        self.check()
+
         # inotify
         wm = WatchManager()
         notifier = ThreadedNotifier(wm, IsoChangeListener(self))
@@ -277,6 +302,8 @@ LABEL {label}
         # services
         signal.signal(signal.SIGTERM, self._sigterm)
         signal.signal(signal.SIGCHLD, self._sigchld)
+
+        logging.info('Start monitoring file in ' + self._args.iso_dir)
 
         try:
             self.loop.run()
@@ -293,41 +320,62 @@ LABEL {label}
         #logging.info('Catch SIGCHLD')
         pass
 
-    def insert(self, image):
+    def insert(self, image, by_copy=False):
         basename = os.path.basename(image)
         image_name = basename[:basename.rfind('.')]
-        logging.info('Inert image {0} in path {1}'.format(image_name, image))
+        logging.info('Inert image {0} in path {1}.'.format(image_name, image))
+        if by_copy:
+            logging.info('COPY MODE')
         if not os.path.isfile(image):
             raise GeneralError(1, 'Image {0} not found'.format(image))
         try:
             nfs_path = os.path.join(self._args.nfs_dir, image_name)
             tftp_path = os.path.join(self._args.tftp_dir, image_name)
             # nfs
-            os.makedirs(os.path.join(self._args.nfs_dir, image_name))
-            Command('mount -t iso9660 "{0}" "{1}"'.format(
-                    image, nfs_path)).run()
-            Command('sed -i -e "$a{0} 172.16.0.0/16'
-                    '(ro,no_root_squash,no_subtree_check)" /etc/exports"'.format(
+            os.makedirs(nfs_path)
+            if not by_copy:
+                Command('mount -t iso9660 "{0}" "{1}"'.format(
+                        image, nfs_path)).run()
+            else:
+                tmp_path = os.path.join(self._args.nfs_dir, 'tmp')
+                if not os.path.exists(tmp_path):
+                    os.makedirs(tmp_path)
+                try:
+                    Command('umount -f {0}'.format(tmp_path)).run()
+                except Exception as e:
+                    pass
+                Command('mount -t iso9660 "{0}" "{1}"'.
+                        format(image, tmp_path)).run()
+                Command('cp -r {0}/* {1}/'.format(tmp_path, nfs_path)).run()
+                try:
+                    Command('umount -f {0}'.format(tmp_path)).run()
+                except Exception as e:
+                    logging.warning('umount: ' + str(e))
+            Command('sed -i -e \'$a{0} 172.16.0.0/16'
+                    '(ro,no_root_squash,no_subtree_check)\' /etc/exports'.format(
                     nfs_path)).run()
             Command('exportfs -a').run()
 
             # tftpboot/pxelinux.cfg/default
             item = self.PXELINUX_DEFAULT_ITEM.format(label=image_name, nfs_base=self._args.nfs_dir)
-            Command('sed -i -e "{content}" {file}'.format(
+            Command('sed -i -e \'$a{content}\' {file}'.format(
                     content=item, 
                     file=os.path.join(self._args.tftp_dir, 'pxelinux.cfg', 'default'))).run()
 
             # vmlinuz and initrd.lz
             os.makedirs(tftp_path)
-            shutil.copy(os.path.join(nfs_path, 'casper', 'initrd.lz'), tftp_path)
-            if os.path.exists(os.path.join(nfs_path, 'casper', 'vmlinuz')):
-                shutil.copy(os.path.join(nfs_path, 'casper', 'vmlinuz'), tftp_path)
-            elif os.path.exists(os.path.join(self._args.nfs_dir, 
-                                             image_name, 'casper', 'vmlinuz.efi')):
-                shutil.copy(os.path.join(nfs_path, 'casper', 'vmlinuz.efi'), 
-                            os.path.join(tftp_path, 'vmlinuz'))
+            for p in ('casper', 'install'):
+                if os.path.exists(os.path.join(nfs_path, p)):
+                    base_casper = p
+                    break
             else:
-                raise GeneralError(2, 'no vmlinuz found')
+                raise GeneralError(3, 'no vmlinuz and initrd.lz base folder')
+            initrd = glob.glob(os.path.join(nfs_path, base_casper, 'initrd*'))
+            vmlinuz = glob.glob(os.path.join(nfs_path, base_casper, 'vmlinu*'))
+            if len(initrd) <= 0 or len(vmlinuz) <= 0:
+                raise GeneralError(4, 'no vmlinuz* or initrd* found in ' + base_casper)
+            shutil.copy(initrd[0], os.path.join(tftp_path, 'initrd.lz'))
+            shutil.copy(vmlinuz[0], os.path.join(tftp_path, 'vmlinuz'))
         except (GeneralError, shutil.Error) as e:
             if isinstance(e, GeneralError):
                 raise e
@@ -351,15 +399,19 @@ LABEL {label}
             # nfs
             Command('sed -i \'/\/%s /d\' /etc/exports' % (image_name)).run()
             Command('exportfs -a').run()
-            try:
-                if os.path.exists(nfs_path):
+            if os.path.exists(nfs_path):
+                try:
                     Command('umount -f {0}'.format(nfs_path)).run()
+                except GeneralError as e:
+                    pass
+                try:
                     shutil.rmtree(nfs_path)
-            except Exception as e:
-                logging.warning('umount: ' + str(e))
-        except Exception as e:
-            logging.error('Command (%s) returns (%d, %s)' % (e.args[0], e.args[1], e.args[2]))
-            return
+                except GeneralError as e:
+                    pass
+        except (GeneralError, shutil.Error) as e:
+            if isinstance(e, GeneralError):
+                raise e
+            raise GeneralError(404, 'Error: ' + str(e))
         logging.info('Remove successfully')
 
     def check(self):
@@ -405,7 +457,7 @@ LABEL {label}
             if len(filename) > width:
                 width = len(filename)
             filepath = os.path.join(self._args.iso_dir, filename)
-            if not os.path.isfile(filepath):
+            if not os.path.isfile(filepath) or not filepath.endswith('.iso'):
                 continue
             files.append((filename, time.localtime(os.path.getmtime(filepath))))
         files.sort(key=lambda fileitem: fileitem[1])
@@ -430,55 +482,7 @@ LABEL {label}
             logging.info('{0:<{1}} {2}'.format(fileitem[0], width, result))
 
     def insert_copy(self, image):
-        basename = os.path.basename(image)
-        image_name = basename[:basename.rfind('.')]
-        logging.info('Inert image {0} in path {1} by copy'.
-                     format(image_name, image))
-        if not os.path.isfile(image):
-            raise GeneralError(1, 'Image {0} not found'.format(image))
-        try:
-            nfs_path = os.path.join(self._args.nfs_dir, image_name)
-            tftp_path = os.path.join(self._args.tftp_dir, image_name)
-            tmp_path = os.path.join(self._args.nfs_dir, 'tmp')
-            # nfs
-            os.makedirs(os.path.join(self._args.nfs_dir, image_name))
-            os.makedirs(os.path.join(self._args.nfs_dir, tmp_path))
-            try:
-                Command('umount -f {0}'.format(tmp_path)).run()
-            except Exception as e:
-                pass
-            Command('mount -t iso9660 "{0}" "{1}"'.
-                    format(image, tmp_path)).run()
-            Command('cp -r {0}/* {1}/'.format(tmp_path, nfs_path)).run()
-            Command('sed -i -e "$a{0} 172.16.0.0/16'
-                    '(ro,no_root_squash,no_subtree_check)" /etc/exports"'.format(
-                    nfs_path)).run()
-            Command('exportfs -a').run()
-            try:
-                Command('umount -f {0}'.format(tmp_path)).run()
-            except Exception as e:
-                logging.warning('umount: ' + str(e))
-            # tftpboot/pxelinux.cfg/default
-            item = self.PXELINUX_DEFAULT_ITEM.format(label=image_name, nfs_base=self._args.nfs_dir)
-            Command('sed -i -e "{content}" {file}'.format(
-                    content=item, 
-                    file=os.path.join(self._args.tftp_dir, 'pxelinux.cfg', 'default'))).run()
-
-            # vmlinuz and initrd.lz
-            os.makedirs(tftp_path)
-            shutil.copy(os.path.join(nfs_path, 'casper', 'initrd.lz'), tftp_path)
-            if os.path.exists(os.path.join(nfs_path, 'casper', 'vmlinuz')):
-                shutil.copy(os.path.join(nfs_path, 'casper', 'vmlinuz'), tftp_path)
-            elif os.path.exists(os.path.join(self._args.nfs_dir, image_name, 'casper', 'vmlinuz.efi')):
-                shutil.copy(os.path.join(nfs_path, 'casper', 'vmlinuz.efi'), 
-                            os.path.join(tftp_path, 'vmlinuz'))
-            else:
-                raise GeneralError(2, 'no vmlinuz found')
-        except (GeneralError, shutil.Error) as e:
-            if isinstance(e, GeneralError):
-                raise e
-            raise GeneralError(404, 'Error: ' + str(e))
-        logging.info('Insert successfully')
+        self.insert(image, True)
 
 
 class Command(object):
@@ -512,7 +516,7 @@ class Command(object):
         if self.returncode != 0 or self.verbose:
             stdout, stderr = result
             message = ['Output:'
-                       '- returncode:\n{0}'.format(returncode)]
+                       '- returncode:\n{0}'.format(self.returncode)]
             if stdout:
                 if type(stdout) is bytes:
                     stdout = stdout.decode()
@@ -528,8 +532,8 @@ class Command(object):
 
         if self.returncode != 0:
             raise GeneralError(self.returncode, 
-                               '1: {0}\n2: {1}'.format(self.stdout, 
-                                                       self.stderr))
+                               '{0}: {1}'.format(self.command_str, 
+                                                 self.stderr))
 
         return self
 

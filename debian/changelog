@@ -1,3 +1,15 @@
+pxeubuntu (0.3) precise; urgency=low
+
+  * Fix lots of bugs
+
+ -- Doro Wu <doro.wu@canonical.com>  Thu, 11 Apr 2013 17:44:48 +0800
+
+pxeubuntu (0.2ubuntu1) precise; urgency=low
+
+  * Add package dependency to nfs, tftp and dhcp
+
+ -- Doro Wu <doro.wu@canonical.com>  Thu, 11 Apr 2013 15:40:26 +0800
+
 pxeubuntu (0.2) precise; urgency=low
 
   * Initial Debian release
