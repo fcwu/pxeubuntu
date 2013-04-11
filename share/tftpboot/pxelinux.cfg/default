@@ -1,0 +1,8 @@
+DEFAULT vesamenu.c32
+MENU TITLE Network boot
+
+#LABEL dell-bto-precise-lanikai-precise-X02-iso-20130326-t
+#    MENU LABEL dell-bto-precise-lanikai-precise-X02-iso-20130326-t
+#    KERNEL ttt/vmlinuz
+#    APPEND initrd=ttt/initrd.lz  root=/dev/nfs nfsroot=172.16.0.1:/home/dorowu/exportfs/dell-bto-precise-lanikai-precise-X02-iso-20130326-t netboot=nfs boot=casper automatic-ubiquity noprompt quiet splash --
+

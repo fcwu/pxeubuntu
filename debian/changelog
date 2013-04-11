@@ -1,0 +1,5 @@
+pxeubuntu (0.2) precise; urgency=low
+
+  * Initial Debian release
+
+ -- Doro Wu <doro.wu@canonical.com>  Thu, 11 Apr 2013 12:44:32 +0800
