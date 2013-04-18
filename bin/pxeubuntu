@@ -4,6 +4,11 @@
 """A PXE boot assistant service
 """
 
+"""XXX BUGS
+* hardcode tftp 172.16.0.1
+* dhcp setting
+"""
+
 
 __version__ = '0.3'
 __all__ = ['PxeUbuntu']
@@ -351,7 +356,7 @@ LABEL {label}\\
                     Command('umount -f {0}'.format(tmp_path)).run()
                 except Exception as e:
                     logging.warning('umount: ' + str(e))
-            Command('sed -i -e \'$a{0} 172.16.0.0/16'
+            Command('sed -i -e \'$a{0} 0.0.0.0/0'
                     '(ro,no_root_squash,no_subtree_check)\' /etc/exports'.format(
                     nfs_path)).run()
             Command('exportfs -a').run()
@@ -546,7 +551,15 @@ class MyArgumentParser(object):
         """
         description = ('A PXE boot assistant service'
                        '')
-        epilog = ('')
+        # XXX
+        epilog = ('subnet 172.16.0.0 netmask 255.255.240.0 {\n\r'
+                  'option routers 172.16.0.1;\n'
+                  'option subnet-mask 255.255.240.0;\n'
+                  'option domain-name-servers 8.8.8.8;\n'
+                  'range dynamic-bootp 172.16.4.0 172.16.15.254;\n'
+                  'default-lease-time 21600;\n'
+                  'max-lease-time 43200;\n'
+                  'filename "pxelinux.0";\n')
         parser = ArgumentParser(description=description, epilog=epilog)
         log_levels = ['notset', 'debug', 'info',
                       'warning', 'error', 'critical']

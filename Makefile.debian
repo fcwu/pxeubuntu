@@ -1,0 +1,36 @@
+GIT_SRC = pxeubuntu-git
+SERIES = precise quantal
+
+.PYONY: ${SERIES}
+
+all: ${SERIES}
+
+${SERIES}:
+	cp -r ${GIT_SRC} ibs-cli~$@
+	cd ${GIT_SRC}~$@ \
+		&& git reset --hard HEAD \
+		&& git clean -xdf \
+		&& rm -rf .git \
+		&& dch -i -D $@ "auto build" \
+		&& sed -i '1 s/(\(.*\))/(\1~$@)/' debian/changelog \
+		&& debuild -S
+
+bzr: pxeubuntu-bzr
+	cd ibs-cli-bzr \
+		&& rm -rf * \
+		&& cp -r ../${GIT_SRC}/* ./ \
+		&& bzr add . \
+		&& bzr commit -m "auto pull from git"
+
+pxeubuntu-bzr:
+	bzr branch lp:~fcwu-tw/+junk/pxeubuntu pxeubuntu-bzr
+
+clean:
+	@for series in ${SERIES} ; do \
+		echo rm -rf ${GIT_SRC}~$$series; \
+		rm -rf ${GIT_SRC}~$$series; \
+	done
+	rm -rf pxeubuntu-bzr
+
+dput:
+	#dput ppa:fcwu-tw/oem ibs-cli_0.3ubuntu1~precise_source.changes
