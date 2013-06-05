@@ -5,7 +5,7 @@
 """
 
 
-__version__ = '1.0'
+__version__ = '1.1'
 __all__ = ['PxeUbuntu']
 __author__ = 'DoroWu'
 __home_page__ = ''
@@ -589,16 +589,16 @@ subnet {0!s} netmask {1!s} {{\\
                     pass
                 try:
                     shutil.rmtree(nfs_path)
-                except GeneralError as e:
+                except:
                     pass
             if os.path.exists(base_path):
                 try:
                     Command('umount -f {0}'.format(base_path)).run()
-                except GeneralError as e:
+                except:
                     pass
                 try:
                     shutil.rmtree(base_path)
-                except GeneralError as e:
+                except:
                     pass
             if os.path.exists(diff_path):
                 try:
