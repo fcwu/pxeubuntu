@@ -1,0 +1,35 @@
+GIT_SRC = pxeubuntu-git
+SERIES = precise raring
+
+.PYONY: ${SERIES}
+
+all: ${SERIES}
+
+${SERIES}:
+	cp -r pxeubuntu-git pxeubuntu~$@
+	cd pxeubuntu~$@ \
+		&& git reset --hard HEAD \
+		&& git clean -xdf \
+		&& rm -rf .git \
+		&& dch -i -D $@ "auto build" \
+		&& sed -i '1 s/(\(.*\))/(\1~$@)/' debian/changelog \
+		&& debuild -S
+
+bzr: pxeubuntu-bzr
+	cd pxeubuntu-bzr \
+		&& rm -rf * \
+		&& cp -r ../${GIT_SRC}/* ./ \
+		&& debcommit
+
+pxeubuntu-bzr:
+	#bzr branch lp:~oem-solutions-group/oem-dev-tools/pxeubuntu pxeubuntu-bzr
+
+clean:
+	@for series in ${SERIES} ; do \
+		echo rm -rf pxeubuntu~$$series; \
+		rm -rf pxeubuntu~$$series; \
+	done
+	rm -rf pxeubuntu-bzr
+
+dput:
+	#dput ppa:fcwu-tw/oem pxeubuntu_0.3ubuntu1~precise_source.changes
