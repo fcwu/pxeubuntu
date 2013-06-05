@@ -5,7 +5,7 @@
 """
 
 
-__version__ = '0.3'
+__version__ = '1.0'
 __all__ = ['PxeUbuntu']
 __author__ = 'DoroWu'
 __home_page__ = ''
@@ -25,6 +25,7 @@ from datetime import datetime, timedelta
 import gobject
 from pyinotify import WatchManager, ThreadedNotifier, EventsCodes, ProcessEvent
 from argparse import ArgumentParser, SUPPRESS
+import ipaddr
 
 
 SHARE_FOLDER = '/usr/share/pxeubuntu'
@@ -43,7 +44,28 @@ def main():
     logging.debug('Arguments: {0!r}'.format(args))
     logging.debug('Extra Arguments: {0!r}'.format(extra_args))
 
+    if not args.interface:
+        for interface in MyNetwork.interfaces():
+            if interface == 'lo':
+                continue
+            args.interface = interface
+    if args.interface not in MyNetwork.interfaces():
+        raise GeneralError(0, 'No interface [%s] found' % str(args.interface))
+
+    if args.aufs:
+        try:
+            Command('grep -q "CONFIG_AUFS_EXPORT=y" '
+                    '/boot/config-`uname -r`').run()
+        except GeneralError as e:
+            if e.code != 0:
+                logging.info('No aufs-nfs supports: Revert to no aufs')
+                args.aufs = False
+
+    if args.log_level <= logging.DEBUG:
+        MyNetwork.test()
+
     PxeUbuntu(args, extra_args).start()
+
 
 class Daemon(object):
     """
@@ -51,7 +73,8 @@ class Daemon(object):
 
     Usage: subclass the Daemon class and override the run() method
     """
-    def __init__(self, pidfile, stdin='/dev/null', stdout='/dev/null', stderr='/dev/null'):
+    def __init__(self, pidfile, stdin='/dev/null', stdout='/dev/null',
+                 stderr='/dev/null'):
         self.stdin = stdin
         self.stdout = stdout
         self.stderr = stderr
@@ -69,7 +92,8 @@ class Daemon(object):
                 # exit first parent
                 sys.exit(0)
         except OSError, e:
-            sys.stderr.write("fork #1 failed: %d (%s)\n" % (e.errno, e.strerror))
+            sys.stderr.write("fork #1 failed: %d (%s)\n".format(
+                             e.errno, e.strerror))
             sys.exit(1)
 
         # decouple from parent environment
@@ -84,7 +108,8 @@ class Daemon(object):
                 # exit from second parent
                 sys.exit(0)
         except OSError, e:
-            sys.stderr.write("fork #2 failed: %d (%s)\n" % (e.errno, e.strerror))
+            sys.stderr.write("fork #2 failed: %d (%s)\n".format(
+                             e.errno, e.strerror))
             sys.exit(1)
 
         # redirect standard file descriptors
@@ -166,8 +191,8 @@ class Daemon(object):
 
     def run(self):
         """
-        You should override this method when you subclass Daemon. It will be called after the process has been
-        daemonized by start() or restart().
+        You should override this method when you subclass Daemon. It will be
+        called after the process has been daemonized by start() or restart().
         """
 
 
@@ -209,12 +234,92 @@ class IsoChangeListener(ProcessEvent):
 
 
 class GeneralError(Exception):
-    def __init__(self, code, msg):
+    def __init__(self, code, msg='Unknown'):
         self.code = code
         self.msg = msg
 
     def __str__(self):
         return 'Error ({0}): {1}'.format(self.code, self.msg)
+
+
+class MyNetwork(object):
+    @classmethod
+    def init(cls):
+        if hasattr(cls, "_has_init"):
+            return
+        cls._has_init = True
+        cls._interfaces = {}
+        interface_name, ip = None, None
+        for line in Command('ip addr', silent=True, verbose=True)\
+                    .run().stdout.split('\n'):
+            logging.debug('! parse {0}'.format(line))
+            if len(line) <= 2:
+                continue
+            if line[0] != ' ' and line[1] == ':':
+                if interface_name:
+                    cls._interfaces[interface_name] = {'address': ip}
+                interface_name = line.split(' ')[1].strip(': ')
+                logging.debug('New interface: ' + interface_name)
+                continue
+            line = line.strip()
+            if line.startswith('inet '):
+                ip = ipaddr.IPv4Network(line.split(' ')[1])
+                logging.debug('New IP: ' + str(ip))
+
+    @classmethod
+    def ip(cls, interface):
+        cls.init()
+        if interface not in cls._interfaces:
+            raise GeneralError(0)
+            return None
+        return cls._interfaces[interface]['address'].ip
+
+    @classmethod
+    def broadcast(cls, interface):
+        cls.init()
+        if interface not in cls._interfaces:
+            raise GeneralError(0)
+            return None
+        return cls._interfaces[interface]['address'].broadcast
+
+    @classmethod
+    def network(cls, interface):
+        cls.init()
+        if interface not in cls._interfaces:
+            raise GeneralError(0)
+            return None
+        return cls._interfaces[interface]['address'].network
+
+    @classmethod
+    def netmask(cls, interface):
+        cls.init()
+        if interface not in cls._interfaces:
+            raise GeneralError(1)
+        return cls._interfaces[interface]['address'].netmask
+
+    @classmethod
+    def netmask_size(cls, interface):
+        cls.init()
+        if interface not in cls._interfaces:
+            raise GeneralError(2)
+        return str(cls._interfaces[interface]['address'].prefixlen)
+
+    @classmethod
+    def interfaces(cls):
+        cls.init()
+        return [interface for interface in cls._interfaces]
+
+    @classmethod
+    def test(cls):
+        for interface in cls.interfaces():
+            logging.info('Interface : ' + interface)
+            logging.info('    IP: {0!s}'.format(cls.ip(interface)))
+            logging.info('    netmask: {0!s}'.format(cls.netmask(interface)))
+            logging.info('    netmask_size: {0!s}'.format(
+                         cls.netmask_size(interface)))
+            logging.info('    broadcast: {0!s}'.format(
+                         cls.broadcast(interface)))
+            logging.info('    network: {0!s}'.format(cls.network(interface)))
 
 
 class PxeUbuntu(Daemon):
@@ -223,8 +328,18 @@ class PxeUbuntu(Daemon):
 LABEL {label}\\
     MENU LABEL {label}\\
     KERNEL {label}/vmlinuz\\
-    APPEND initrd={label}/initrd.lz  root=/dev/nfs nfsroot=172.16.0.1:{nfs_base}/{label} netboot=nfs boot=casper automatic-ubiquity noprompt quiet splash --\\
+    APPEND initrd={label}/initrd.lz  root=/dev/nfs nfsroot={ip}:{nfs_base}/{label} netboot=nfs boot=casper automatic-ubiquity noprompt quiet splash --\\
 ### {label} - end
+'''
+    DHCP_DEFAULT_CONF = \
+'''### Automatically Add by pxeubuntu - start\\
+subnet {0!s} netmask {1!s} {{\\
+    range dynamic-bootp {2!s} {3!s};\\
+    default-lease-time 21600;\\
+    max-lease-time 43200;\\
+    filename "pxelinux.0";\\
+}}\\
+### Automatically Add by pxeubuntu - end
 '''
 
     def __init__(self, args, extra_args):
@@ -245,17 +360,21 @@ LABEL {label}\\
             logging.info('args: {0}: {1}'.format(path_attr, path))
             if not os.path.isdir(path):
                 os.makedirs(path)
-        action_fns = {'start': _start, 
+        action_fns = {'start': _start,
                       'stop': self.stop,
                       'restart': self.restart,
                       'insert': self.insert,
                       'remove': self.remove,
                       'check': self.check,
-                      'insert_copy': self.insert_copy}
+                      'insert_copy': self.insert_copy,
+                      'version': self.version}
         if len(self._extra_args) > 0:
             action_fns[self._args.action](self._extra_args[0])
         else:
             action_fns[self._args.action]()
+
+    def version(self):
+        logging.info('Version: ' + str(__version__))
 
     def run(self):
         # main loop
@@ -271,6 +390,31 @@ LABEL {label}\\
         Command('cp -r {0} {1}'.
                 format(os.path.join(SHARE_FOLDER, 'tftpboot/*'),
                        self._args.tftp_dir + os.sep)).run()
+
+        # dhcp check
+        try:
+            network = str(MyNetwork.network(self._args.interface))
+            with open('/etc/dhcp/dhcpd.conf', 'r') as f:
+                for line in f:
+                    if line.startswith('#'):
+                        continue
+                    if line.find('pxelinux.0') >= 0:
+                        raise GeneralError(0)
+                    if line.find(network) >= 0:
+                        raise GeneralError(0)
+            out = raw_input('Add PXE boot configure to dhcpd.conf? (Y/N) ')
+            if out[0] in ('Y', 'y'):
+                item = self.DHCP_DEFAULT_CONF.format(
+                    MyNetwork.network(self._args.interface),
+                    MyNetwork.netmask(self._args.interface),
+                    MyNetwork.ip(self._args.interface) + 1,
+                    MyNetwork.broadcast(self._args.interface) - 1)
+                Command('sed -i -e \'$a{content}\' {file}'.format(
+                        content=item,
+                        file='/etc/dhcp/dhcpd.conf')).run()
+                Command('service isc-dhcp-server restart').run()
+        except GeneralError:
+            pass
 
         #remove all in iso, then insert
         files = []
@@ -312,6 +456,19 @@ LABEL {label}\\
 
         notifier.stop()
 
+        #remove all in iso, then insert
+        files = []
+        for filename in os.listdir(self._args.iso_dir):
+            filepath = os.path.join(self._args.iso_dir, filename)
+            if not os.path.isfile(filepath) or not filepath.endswith('.iso'):
+                continue
+            files.append(filepath)
+        for f in files:
+            try:
+                self.remove(f)
+            except GeneralError as e:
+                logging.warning(str(e))
+
     def _sigterm(self, signum, frame):
         logging.info('Catch SIGTERM')
         self.loop.quit()
@@ -331,9 +488,22 @@ LABEL {label}\\
         try:
             nfs_path = os.path.join(self._args.nfs_dir, image_name)
             tftp_path = os.path.join(self._args.tftp_dir, image_name)
+            base_path = os.path.join(self._args.nfs_dir, image_name + '_orig')
+            diff_path = os.path.join(self._args.nfs_dir, image_name + '_pxediff')
             # nfs
             os.makedirs(nfs_path)
-            if not by_copy:
+            if not by_copy and self._args.aufs:
+                os.makedirs(base_path)
+                Command('mount -t iso9660 "{0}" "{1}"'.format(
+                        image, base_path)).run()
+                try:
+                    shutil.rmtree(diff_path)
+                except:
+                    pass
+                os.makedirs(diff_path)
+                Command('mount -t aufs -o br:{0}:{1} none {2}'.format(
+                        diff_path, base_path, nfs_path)).run()
+            elif not by_copy and not self._args.aufs:
                 Command('mount -t iso9660 "{0}" "{1}"'.format(
                         image, nfs_path)).run()
             else:
@@ -351,16 +521,27 @@ LABEL {label}\\
                     Command('umount -f {0}'.format(tmp_path)).run()
                 except Exception as e:
                     logging.warning('umount: ' + str(e))
-            Command('sed -i -e \'$a{0} 172.16.0.0/16'
-                    '(ro,no_root_squash,no_subtree_check)\' /etc/exports'.format(
-                    nfs_path)).run()
+            cmd = ('sed -i -e \'$a{0!s} {1!s}/{2!s}'
+                  '(ro,no_root_squash,no_subtree_check)\' /etc/exports').format(
+                  nfs_path, MyNetwork.ip(self._args.interface),
+                  MyNetwork.netmask_size(self._args.interface))
+            if self._args.aufs:
+                cmd = ('sed -i -e \'$a{0!s} {1!s}/{2!s}'
+                    '(rw,sync,fsid=999,no_subtree_check)\' /etc/exports').format(
+                    nfs_path, MyNetwork.ip(self._args.interface),
+                    MyNetwork.netmask_size(self._args.interface))
+            Command(cmd).run()
             Command('exportfs -a').run()
 
             # tftpboot/pxelinux.cfg/default
-            item = self.PXELINUX_DEFAULT_ITEM.format(label=image_name, nfs_base=self._args.nfs_dir)
+            item = self.PXELINUX_DEFAULT_ITEM.format(
+                        label=image_name,
+                        nfs_base=self._args.nfs_dir,
+                        ip=str(MyNetwork.ip(self._args.interface)))
             Command('sed -i -e \'$a{content}\' {file}'.format(
-                    content=item, 
-                    file=os.path.join(self._args.tftp_dir, 'pxelinux.cfg', 'default'))).run()
+                    content=item,
+                    file=os.path.join(self._args.tftp_dir, 'pxelinux.cfg',
+                                      'default'))).run()
 
             # vmlinuz and initrd.lz
             os.makedirs(tftp_path)
@@ -389,12 +570,14 @@ LABEL {label}\\
         try:
             nfs_path = os.path.join(self._args.nfs_dir, image_name)
             tftp_path = os.path.join(self._args.tftp_dir, image_name)
+            base_path = os.path.join(self._args.nfs_dir, image_name + '_orig')
+            diff_path = os.path.join(self._args.nfs_dir, image_name + '_pxediff')
             # tftp
             if os.path.exists(tftp_path):
                 shutil.rmtree(tftp_path)
             # tftp default
             Command('sed -i \'/### {0} - start/,/### {0} - end/d\' {1}'.
-                    format(image_name, 
+                    format(image_name,
                            os.path.join(self._args.tftp_dir, 'pxelinux.cfg', 'default'))).run()
             # nfs
             Command('sed -i \'/\/%s /d\' /etc/exports' % (image_name)).run()
@@ -407,6 +590,20 @@ LABEL {label}\\
                 try:
                     shutil.rmtree(nfs_path)
                 except GeneralError as e:
+                    pass
+            if os.path.exists(base_path):
+                try:
+                    Command('umount -f {0}'.format(base_path)).run()
+                except GeneralError as e:
+                    pass
+                try:
+                    shutil.rmtree(base_path)
+                except GeneralError as e:
+                    pass
+            if os.path.exists(diff_path):
+                try:
+                    shutil.rmtree(diff_path)
+                except:
                     pass
         except (GeneralError, shutil.Error) as e:
             if isinstance(e, GeneralError):
@@ -488,10 +685,10 @@ LABEL {label}\\
 class Command(object):
     """Simple subprocess. Popen wrapper to run shell commands and log their output
     """
-    def __init__(self, command_str, silent=False):
+    def __init__(self, command_str, silent=False, verbose=False):
         self.command_str = command_str
         self.silent = silent
-        self.verbose = False
+        self.verbose = verbose
 
         self.process = None
         self.stdout = None
@@ -525,14 +722,15 @@ class Command(object):
                 if type(stderr) is bytes:
                     stderr = stderr.decode()
                 message.append('- stderr:\n{0}'.format(stderr))
-            logging.debug('\n'.join(message))
+            if not self.silent:
+                logging.debug('\n'.join(message))
 
             self.stdout = stdout
             self.stderr = stderr
 
         if self.returncode != 0:
-            raise GeneralError(self.returncode, 
-                               '{0}: {1}'.format(self.command_str, 
+            raise GeneralError(self.returncode,
+                               '{0}: {1}'.format(self.command_str,
                                                  self.stderr))
 
         return self
@@ -558,29 +756,34 @@ class MyArgumentParser(object):
                                           log_levels[-1])))
         parser.add_argument('--log-dir', dest='log_dir', default='/var/log',
                             help=('Path to the directory to store log files'))
-        parser.add_argument('--work-dir', dest='work_dir', 
+        parser.add_argument('--work-dir', dest='work_dir',
                             default=os.path.expanduser('~'),
                             help=('Path to the working directory. '
                                   '$HOME directory is default. '
                                   'Some directories refer this option as base folder'
                                   ', such as iso, nfs mount point, tftp'))
-        parser.add_argument('--iso-dir', dest='iso_dir', 
+        parser.add_argument('--iso-dir', dest='iso_dir',
                             default='iso',
                             help=('Directory to put iso files'))
-        parser.add_argument('--nfs-dir', dest='nfs_dir', 
+        parser.add_argument('--nfs-dir', dest='nfs_dir',
                             default='exportfs',
                             help=('Directory to mount iso files'))
-        parser.add_argument('--tftp-dir', dest='tftp_dir', 
+        parser.add_argument('--tftp-dir', dest='tftp_dir',
                             default='/var/lib/tftpboot',
                             help=('Directory to tftp root'))
-        parser.add_argument('--pid-file', dest='service_pid_file', 
+        parser.add_argument('--pid-file', dest='service_pid_file',
                             default=os.path.basename(__file__) + '.pid',
                             help=SUPPRESS)
-        parser.add_argument('-d', '--daemon', action='store_true', 
+        parser.add_argument('-d', '--daemon', action='store_true',
                             help=('Run as daemon'))
+        parser.add_argument('-i', '--interface', dest='interface',
+                            help=('network interface such as eth0, wlan0 for'
+                                  ' DHCP and NFS binding'))
+        parser.add_argument('--aufs', action='store_true',
+                            help=SUPPRESS)
         actions = ['start', 'stop', 'restart', 'insert', 'remove', 'check',
-                   'insert_copy']
-        parser.add_argument('action', choices=actions, 
+                   'insert_copy', 'version']
+        parser.add_argument('action', choices=actions,
                             default='check',
                             help=('Action is one of {0}'.
                                   format(', '.join(actions))))
@@ -604,6 +807,7 @@ class MyArgumentParser(object):
         args.log_filename = os.path.join(args.log_dir,
                                          ('{0}.log'
                                           .format(os.path.basename(__file__))))
+
         return args, extra_args
 
 
@@ -618,7 +822,8 @@ class LoggingConfiguration(object):
         # Log to sys.stderr using log level passed through command line
         if log_level != logging.NOTSET:
             log_handler = logging.StreamHandler()
-            formatter = logging.Formatter('%(levelname)-8s %(message)s')
+            formatter = logging.Formatter('%(asctime)s %(levelname)-8s '
+                                        '%(message)s')
             log_handler.setFormatter(formatter)
             log_handler.setLevel(log_level)
             logger.addHandler(log_handler)
